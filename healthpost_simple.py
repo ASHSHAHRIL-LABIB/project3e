@@ -1,13 +1,18 @@
-import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
+from database import DatabaseFactory
+from repository import HealthPostRepository
+from services import AuthenticationService, DispensingService
+from stock_strategy import ThresholdLowStockStrategy
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, "healthpost.db")
+DATABASE_FACTORY = DatabaseFactory(DB)
 
 
 def connect():
-    return sqlite3.connect(DB)
+    return DATABASE_FACTORY.connect()
 
 
 def setup():
@@ -32,8 +37,15 @@ def setup():
 
 
 class HealthPost:
-    def __init__(self, root):
+    def __init__(self, root, stock_strategy=None):
         self.root = root
+        self.repository = HealthPostRepository(connect)
+        self.authentication_service = AuthenticationService(self.repository)
+        self.dispensing_service = DispensingService(self.repository)
+        self.stock_strategy = (
+            stock_strategy if stock_strategy is not None
+            else ThresholdLowStockStrategy()
+        )
         root.title("HealthPost Desktop")
         root.geometry("760x480")
         self.login()
@@ -57,10 +69,9 @@ class HealthPost:
         ttk.Label(box, text="First login: admin / admin").pack()
 
     def check_login(self):
-        with connect() as db:
-            row = db.execute("SELECT 1 FROM users WHERE username=? AND password=?",
-                             (self.username.get(), self.password.get())).fetchone()
-        if row:
+        if self.authentication_service.authenticate(
+            self.username.get(), self.password.get()
+        ):
             self.main()
         else:
             messagebox.showerror("Login failed", "Wrong username or password")
@@ -167,7 +178,7 @@ class HealthPost:
         self.m_tree.delete(*self.m_tree.get_children())
         with connect() as db:
             for row in db.execute("SELECT id,name,stock,threshold FROM medicines ORDER BY name"):
-                status = " LOW STOCK" if row[2] <= row[3] else ""
+                status = " LOW STOCK" if self.stock_strategy.is_low(row[2], row[3]) else ""
                 self.m_tree.insert("", "end", values=(row[0], row[1] + status, row[2], row[3]))
 
     def build_dispense(self):
@@ -211,14 +222,9 @@ class HealthPost:
         except (ValueError, IndexError):
             messagebox.showerror("Invalid data", "Choose a patient and medicine, and enter a positive quantity.")
             return
-        with connect() as db:
-            row = db.execute("SELECT stock FROM medicines WHERE id=?", (medicine_id,)).fetchone()
-            if not row or row[0] < qty:
-                messagebox.showerror("Not enough stock", "There is not enough medicine in stock.")
-                return
-            db.execute("UPDATE medicines SET stock=stock-? WHERE id=?", (qty, medicine_id))
-            db.execute("INSERT INTO visits(patient_id,medicine_id,quantity) VALUES(?,?,?)",
-                       (patient_id, medicine_id, qty))
+        if not self.dispensing_service.dispense(patient_id, medicine_id, qty):
+            messagebox.showerror("Not enough stock", "There is not enough medicine in stock.")
+            return
         self.d_qty.delete(0, "end")
         self.refresh_medicines()
         self.refresh_dispense()
